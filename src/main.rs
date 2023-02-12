@@ -1,5 +1,6 @@
 //! Server process
 use clap::Parser;
+use console_subscriber::ConsoleLayer;
 use nostr_rs_relay::cli::CLIArgs;
 use nostr_rs_relay::config;
 use nostr_rs_relay::server::start_server;
@@ -7,7 +8,6 @@ use std::sync::mpsc as syncmpsc;
 use std::sync::mpsc::{Receiver as MpscReceiver, Sender as MpscSender};
 use std::thread;
 use tracing::info;
-use console_subscriber::ConsoleLayer;
 
 /// Start running a Nostr relay server.
 fn main() {
@@ -42,6 +42,7 @@ fn main() {
     // shutdown, etc.; for now all this does is initiate shutdown if
     // `()` is sent.  This will change in the future, this is just a
     // stopgap to shutdown the relay when it is used as a library.
+    // 多消费者、单生产者队列
     let (_, ctrl_rx): (MpscSender<()>, MpscReceiver<()>) = syncmpsc::channel();
     // run this in a new thread
     let handle = thread::spawn(move || {
