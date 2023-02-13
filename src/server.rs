@@ -16,6 +16,7 @@ use crate::subscription::Subscription;
 use futures::SinkExt;
 use futures::StreamExt;
 use governor::{Jitter, Quota, RateLimiter};
+// hyper is a fast and correct HTTP implementation written in and for Rust.
 use http::header::HeaderMap;
 use hyper::header::ACCEPT;
 use hyper::service::{make_service_fn, service_fn};
@@ -23,6 +24,7 @@ use hyper::upgrade::Upgraded;
 use hyper::{
     header, server::conn::AddrStream, upgrade, Body, Request, Response, Server, StatusCode,
 };
+// https://prometheus.io/docs/introduction/overview/
 use prometheus::IntCounterVec;
 use prometheus::IntGauge;
 use prometheus::{Encoder, Histogram, HistogramOpts, IntCounter, Opts, Registry, TextEncoder};
@@ -198,7 +200,7 @@ async fn handle_web_request(
         }
     }
 }
-
+// 获取请求头
 fn get_header_string(header: &str, headers: &HeaderMap) -> Option<String> {
     headers
         .get(header)
@@ -210,6 +212,7 @@ async fn ctrl_c_or_signal(mut shutdown_signal: Receiver<()>) {
     let mut term_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("could not define signal");
     loop {
+        // 	Waits on multiple concurrent branches, returning when the first branch completes, cancelling the remaining branches.
         tokio::select! {
             _ = shutdown_signal.recv() => {
                 info!("Shutting down webserver as requested");
@@ -228,6 +231,7 @@ async fn ctrl_c_or_signal(mut shutdown_signal: Receiver<()>) {
     }
 }
 
+// 性能分析相关
 fn create_metrics() -> (Registry, NostrMetrics) {
     // setup prometheus registry
     let registry = Registry::new();
@@ -375,12 +379,15 @@ pub fn start_server(settings: &Settings, shutdown_rx: MpscReceiver<()>) -> Resul
         // other client on this channel.  This should be large enough
         // to accomodate slower readers (messages are dropped if
         // clients can not keep up).
+        // 需要广播的事件
         let (bcast_tx, _) = broadcast::channel::<Event>(broadcast_buffer_limit);
         // validated events that need to be persisted are sent to the
         // database on via this channel.
+        // 需要存到数据库的数据
         let (event_tx, event_rx) = mpsc::channel::<SubmittedEvent>(persist_buffer_limit);
         // establish a channel for letting all threads now about a
         // requested server shutdown.
+        // 请求服务器关闭
         let (invoke_shutdown, shutdown_listen) = broadcast::channel::<()>(1);
         // create a channel for sending any new metadata event.  These
         // will get processed relatively slowly (a potentially
@@ -398,6 +405,7 @@ pub fn start_server(settings: &Settings, shutdown_rx: MpscReceiver<()>) -> Resul
         // start the database writer task.  Give it a channel for
         // writing events, and for publishing events that have been
         // written (to all connected clients).
+        // A task is a light weight, non-blocking unit of execution
         tokio::task::spawn(db::db_writer(
             repo.clone(),
             settings.clone(),
@@ -428,8 +436,10 @@ pub fn start_server(settings: &Settings, shutdown_rx: MpscReceiver<()>) -> Resul
 
         // listen for (external to tokio) shutdown request
         let controlled_shutdown = invoke_shutdown.clone();
+        // 	Spawns a new asynchronous task, returning a JoinHandle for it.
         tokio::spawn(async move {
             info!("control message listener started");
+            // 接收外部发送的消息
             match shutdown_rx.recv() {
                 Ok(()) => {
                     info!("control message requesting shutdown");
@@ -443,9 +453,11 @@ pub fn start_server(settings: &Settings, shutdown_rx: MpscReceiver<()>) -> Resul
         // listen for ctrl-c interruupts
         let ctrl_c_shutdown = invoke_shutdown.clone();
         // listener for webserver shutdown
+        // New Receiver handles are created by calling Sender::subscribe.
         let webserver_shutdown_listen = invoke_shutdown.subscribe();
 
         tokio::spawn(async move {
+            // 接收 ctrl_c 信号
             tokio::signal::ctrl_c().await.unwrap();
             info!("shutting down due to SIGINT (main)");
             ctrl_c_shutdown.send(()).ok();
@@ -456,6 +468,7 @@ pub fn start_server(settings: &Settings, shutdown_rx: MpscReceiver<()>) -> Resul
 
         // A `Service` is needed for every connection, so this
         // creates one from our `handle_request` function.
+        // Create a MakeService from a function.
         let make_svc = make_service_fn(|conn: &AddrStream| {
             let repo = repo.clone();
             let remote_addr = conn.remote_addr();
@@ -468,6 +481,7 @@ pub fn start_server(settings: &Settings, shutdown_rx: MpscReceiver<()>) -> Resul
             async move {
                 // service_fn converts our function into a `Service`
                 Ok::<_, Infallible>(service_fn(move |request: Request<Body>| {
+                    // 处理 web 请求
                     handle_web_request(
                         request,
                         repo.clone(),
@@ -482,8 +496,11 @@ pub fn start_server(settings: &Settings, shutdown_rx: MpscReceiver<()>) -> Resul
                 }))
             }
         });
+        // start listening for HTTP requests
         let server = Server::bind(&socket_addr)
+            // Consume this Builder, creating a Server.
             .serve(make_svc)
+            // Prepares a server to handle graceful shutdown when the provided future completes.
             .with_graceful_shutdown(ctrl_c_or_signal(webserver_shutdown_listen));
         // run hyper in this thread.  This is why the thread does not return.
         if let Err(e) = server.await {

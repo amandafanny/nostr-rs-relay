@@ -27,6 +27,7 @@ pub struct RelayInfo {
 }
 
 /// Convert an Info configuration into public Relay Info
+// http 请求返回的信息格式
 impl From<config::Info> for RelayInfo {
     fn from(i: config::Info) -> Self {
         RelayInfo {

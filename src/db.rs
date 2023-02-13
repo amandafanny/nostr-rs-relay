@@ -2,21 +2,21 @@
 use crate::config::Settings;
 use crate::error::{Error, Result};
 use crate::event::Event;
-use crate::notice::Notice;
-use crate::server::NostrMetrics;
 use crate::nauthz;
+use crate::notice::Notice;
+use crate::repo::postgres::{PostgresPool, PostgresRepo};
+use crate::repo::sqlite::SqliteRepo;
+use crate::repo::NostrRepo;
+use crate::server::NostrMetrics;
 use governor::clock::Clock;
 use governor::{Quota, RateLimiter};
 use r2d2;
-use std::sync::Arc;
-use std::thread;
 use sqlx::pool::PoolOptions;
 use sqlx::postgres::PgConnectOptions;
 use sqlx::ConnectOptions;
-use crate::repo::sqlite::SqliteRepo;
-use crate::repo::postgres::{PostgresRepo,PostgresPool};
-use crate::repo::NostrRepo;
-use std::time::{Instant, Duration};
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
 use tracing::log::LevelFilter;
 use tracing::{debug, info, trace, warn};
 
@@ -41,8 +41,8 @@ pub const DB_FILE: &str = "nostr.db";
 /// Will panic if the pool could not be created.
 pub async fn build_repo(settings: &Settings, metrics: NostrMetrics) -> Arc<dyn NostrRepo> {
     match settings.database.engine.as_str() {
-        "sqlite" => {Arc::new(build_sqlite_pool(settings, metrics).await)},
-        "postgres" => {Arc::new(build_postgres_pool(settings, metrics).await)},
+        "sqlite" => Arc::new(build_sqlite_pool(settings, metrics).await),
+        "postgres" => Arc::new(build_postgres_pool(settings, metrics).await),
         _ => panic!("Unknown database engine"),
     }
 }
@@ -113,10 +113,11 @@ pub async fn db_writer(
     };
 
     //let gprc_client = settings.grpc.event_admission_server.map(|s| {
-//        event_admitter_connect(&s);
-//    });
+    //        event_admitter_connect(&s);
+    //    });
 
     loop {
+        // 停止信号结束任务
         if shutdown.try_recv().is_ok() {
             info!("shutting down database writer");
             break;
@@ -162,10 +163,7 @@ pub async fn db_writer(
                     &event.kind
                 );
                 notice_tx
-                    .try_send(Notice::blocked(
-                        event.id,
-                        "event kind is blocked by relay"
-                    ))
+                    .try_send(Notice::blocked(event.id, "event kind is blocked by relay"))
                     .ok();
                 continue;
             }
@@ -187,7 +185,6 @@ pub async fn db_writer(
             None
         };
 
-
         // check for  NIP-05 verification
         if nip05_enabled && validation.is_some() {
             match validation.as_ref().unwrap() {
@@ -198,7 +195,6 @@ pub async fn db_writer(
                             uv.name.to_string(),
                             event.get_author_prefix()
                         );
-
                     } else {
                         info!(
                             "rejecting event, author ({:?} / {:?}) verification invalid (expired/wrong domain)",
@@ -235,27 +231,43 @@ pub async fn db_writer(
         }
 
         // nip05 address
-        let nip05_address : Option<crate::nip05::Nip05Name> = validation.and_then(|x| x.ok().map(|y| y.name));
+        let nip05_address: Option<crate::nip05::Nip05Name> =
+            validation.and_then(|x| x.ok().map(|y| y.name));
 
         // GRPC check
         if let Some(ref mut c) = grpc_client {
             trace!("checking if grpc permits");
             let grpc_start = Instant::now();
-            let decision_res = c.admit_event(&event, &subm_event.source_ip, subm_event.origin, subm_event.user_agent, nip05_address).await;
+            let decision_res = c
+                .admit_event(
+                    &event,
+                    &subm_event.source_ip,
+                    subm_event.origin,
+                    subm_event.user_agent,
+                    nip05_address,
+                )
+                .await;
             match decision_res {
                 Ok(decision) => {
                     if !decision.permitted() {
                         // GPRC returned a decision to reject this event
-                        info!("GRPC rejected event: {:?} (kind: {}) from: {:?} in: {:?} (IP: {:?})",
-                              event.get_event_id_prefix(),
-                              event.kind,
-                              event.get_author_prefix(),
-                              grpc_start.elapsed(),
-                              subm_event.source_ip);
-                        notice_tx.try_send(Notice::blocked(event.id, &decision.message().unwrap_or_else(|| "".to_string()))).ok();
+                        info!(
+                            "GRPC rejected event: {:?} (kind: {}) from: {:?} in: {:?} (IP: {:?})",
+                            event.get_event_id_prefix(),
+                            event.kind,
+                            event.get_author_prefix(),
+                            grpc_start.elapsed(),
+                            subm_event.source_ip
+                        );
+                        notice_tx
+                            .try_send(Notice::blocked(
+                                event.id,
+                                &decision.message().unwrap_or_else(|| "".to_string()),
+                            ))
+                            .ok();
                         continue;
                     }
-                },
+                }
                 Err(e) => {
                     warn!("GRPC server error: {:?}", e);
                 }
