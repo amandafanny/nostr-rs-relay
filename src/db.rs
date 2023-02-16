@@ -30,6 +30,7 @@ pub struct SubmittedEvent {
     pub source_ip: String,
     pub origin: Option<String>,
     pub user_agent: Option<String>,
+    pub auth_pubkey: Option<Vec<u8>>,
 }
 
 /// Database file
@@ -245,6 +246,7 @@ pub async fn db_writer(
                     subm_event.origin,
                     subm_event.user_agent,
                     nip05_address,
+                    subm_event.auth_pubkey,
                 )
                 .await;
             match decision_res {
