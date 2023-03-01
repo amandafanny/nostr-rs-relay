@@ -1,7 +1,12 @@
 //! Event parsing and validation
 use crate::delegation::validate_delegation;
-use crate::error::Error::{CommandUnknownError, EventCouldNotCanonicalize, EventInvalidId, EventInvalidSignature, EventMalformedPubkey};
+use crate::error::Error::{
+    CommandUnknownError, EventCouldNotCanonicalize, EventInvalidId, EventInvalidSignature,
+    EventMalformedPubkey,
+};
 use crate::error::Result;
+use crate::event::EventWrapper::WrappedAuth;
+use crate::event::EventWrapper::WrappedEvent;
 use crate::nip05;
 use crate::utils::unix_time;
 use bitcoin_hashes::{sha256, Hash};
@@ -14,8 +19,6 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::str::FromStr;
 use tracing::{debug, info};
-use crate::event::EventWrapper::WrappedEvent;
-use crate::event::EventWrapper::WrappedAuth;
 
 lazy_static! {
     /// Secp256k1 verification instance.
@@ -30,7 +33,8 @@ pub struct EventCmd {
 }
 
 impl EventCmd {
-    #[must_use] pub fn event_id(&self) -> &str {
+    #[must_use]
+    pub fn event_id(&self) -> &str {
         &self.event.id
     }
 }
@@ -67,7 +71,8 @@ where
 }
 
 /// Attempt to form a single-char tag name.
-#[must_use] pub fn single_char_tagname(tagname: &str) -> Option<char> {
+#[must_use]
+pub fn single_char_tagname(tagname: &str) -> Option<char> {
     // We return the tag character if and only if the tagname consists
     // of a single char.
     let mut tagnamechars = tagname.chars();
@@ -85,10 +90,9 @@ where
     }
 }
 
-
 pub enum EventWrapper {
     WrappedEvent(Event),
-    WrappedAuth(Event)
+    WrappedAuth(Event),
 }
 
 /// Convert network event to parsed/validated event.
@@ -114,7 +118,8 @@ impl From<EventCmd> for Result<EventWrapper> {
 
 impl Event {
     #[cfg(test)]
-    #[must_use] pub fn simple_event() -> Event {
+    #[must_use]
+    pub fn simple_event() -> Event {
         Event {
             id: "0".to_owned(),
             pubkey: "0".to_owned(),
@@ -128,52 +133,73 @@ impl Event {
         }
     }
 
-    #[must_use] pub fn is_kind_metadata(&self) -> bool {
+    #[must_use]
+    pub fn is_kind_metadata(&self) -> bool {
         self.kind == 0
     }
 
     /// Should this event be persisted?
-    #[must_use] pub fn is_ephemeral(&self) -> bool {
+    #[must_use]
+    pub fn is_ephemeral(&self) -> bool {
         self.kind >= 20000 && self.kind < 30000
+    }
+
+    /// Is this event currently expired?
+    pub fn is_expired(&self) -> bool {
+        if let Some(exp) = self.expiration() {
+            exp <= unix_time()
+        } else {
+            false
+        }
     }
 
     /// Determine the time at which this event should expire
     pub fn expiration(&self) -> Option<u64> {
         let default = "".to_string();
-        let dvals:Vec<&String> = self.tags
+        let dvals: Vec<&String> = self
+            .tags
             .iter()
             .filter(|x| !x.is_empty())
             .filter(|x| x.get(0).unwrap() == "expiration")
-            .map(|x| x.get(1).unwrap_or(&default)).take(1)
+            .map(|x| x.get(1).unwrap_or(&default))
+            .take(1)
             .collect();
         let val_first = dvals.get(0);
         val_first.and_then(|t| t.parse::<u64>().ok())
     }
 
     /// Should this event be replaced with newer timestamps from same author?
-    #[must_use] pub fn is_replaceable(&self) -> bool {
-        self.kind == 0 || self.kind == 3 || self.kind == 41 || (self.kind >= 10000 && self.kind < 20000)
+    #[must_use]
+    pub fn is_replaceable(&self) -> bool {
+        self.kind == 0
+            || self.kind == 3
+            || self.kind == 41
+            || (self.kind >= 10000 && self.kind < 20000)
     }
 
     /// Should this event be replaced with newer timestamps from same author, for distinct `d` tag values?
-    #[must_use] pub fn is_param_replaceable(&self) -> bool {
+    #[must_use]
+    pub fn is_param_replaceable(&self) -> bool {
         self.kind >= 30000 && self.kind < 40000
     }
 
     /// Should this event be replaced with newer timestamps from same author, for distinct `d` tag values?
-    #[must_use] pub fn distinct_param(&self) -> Option<String> {
+    #[must_use]
+    pub fn distinct_param(&self) -> Option<String> {
         if self.is_param_replaceable() {
             let default = "".to_string();
-            let dvals:Vec<&String> = self.tags
+            let dvals: Vec<&String> = self
+                .tags
                 .iter()
                 .filter(|x| !x.is_empty())
                 .filter(|x| x.get(0).unwrap() == "d")
-                .map(|x| x.get(1).unwrap_or(&default)).take(1)
+                .map(|x| x.get(1).unwrap_or(&default))
+                .take(1)
                 .collect();
             let dval_first = dvals.get(0);
             match dval_first {
-                Some(_) => {dval_first.map(|x| x.to_string())},
-                None => Some(default)
+                Some(_) => dval_first.map(|x| x.to_string()),
+                None => Some(default),
             }
         } else {
             None
@@ -181,7 +207,8 @@ impl Event {
     }
 
     /// Pull a NIP-05 Name out of the event, if one exists
-    #[must_use] pub fn get_nip05_addr(&self) -> Option<nip05::Nip05Name> {
+    #[must_use]
+    pub fn get_nip05_addr(&self) -> Option<nip05::Nip05Name> {
         if self.is_kind_metadata() {
             // very quick check if we should attempt to parse this json
             if self.content.contains("\"nip05\"") {
@@ -198,7 +225,8 @@ impl Event {
     // is this event delegated (properly)?
     // does the signature match, and are conditions valid?
     // if so, return an alternate author for the event
-    #[must_use] pub fn delegated_author(&self) -> Option<String> {
+    #[must_use]
+    pub fn delegated_author(&self) -> Option<String> {
         // is there a delegation tag?
         let delegation_tag: Vec<String> = self
             .tags
@@ -206,7 +234,8 @@ impl Event {
             .filter(|x| x.len() == 4)
             .filter(|x| x.get(0).unwrap() == "delegation")
             .take(1)
-            .next()?.clone(); // get first tag
+            .next()?
+            .clone(); // get first tag
 
         //let delegation_tag = self.tag_values_by_name("delegation");
         // delegation tags should have exactly 3 elements after the name (pubkey, condition, sig)
@@ -266,15 +295,18 @@ impl Event {
     }
 
     /// Create a short event identifier, suitable for logging.
-    #[must_use] pub fn get_event_id_prefix(&self) -> String {
+    #[must_use]
+    pub fn get_event_id_prefix(&self) -> String {
         self.id.chars().take(8).collect()
     }
-    #[must_use] pub fn get_author_prefix(&self) -> String {
+    #[must_use]
+    pub fn get_author_prefix(&self) -> String {
         self.pubkey.chars().take(8).collect()
     }
 
     /// Retrieve tag initial values across all tags matching the name
-    #[must_use] pub fn tag_values_by_name(&self, tag_name: &str) -> Vec<String> {
+    #[must_use]
+    pub fn tag_values_by_name(&self, tag_name: &str) -> Vec<String> {
         self.tags
             .iter()
             .filter(|x| x.len() > 1)
@@ -283,7 +315,8 @@ impl Event {
             .collect()
     }
 
-    #[must_use] pub fn is_valid_timestamp(&self, reject_future_seconds: Option<usize>) -> bool {
+    #[must_use]
+    pub fn is_valid_timestamp(&self, reject_future_seconds: Option<usize>) -> bool {
         if let Some(allowable_future) = reject_future_seconds {
             let curr_time = unix_time();
             // calculate difference, plus how far future we allow
@@ -375,7 +408,8 @@ impl Event {
     }
 
     /// Determine if the given tag and value set intersect with tags in this event.
-    #[must_use] pub fn generic_tag_val_intersect(&self, tagname: char, check: &HashSet<String>) -> bool {
+    #[must_use]
+    pub fn generic_tag_val_intersect(&self, tagname: char, check: &HashSet<String>) -> bool {
         match &self.tagidx {
             // check if this is indexable tagname
             Some(idx) => match idx.get(&tagname) {
@@ -386,6 +420,22 @@ impl Event {
                 None => false,
             },
             None => false,
+        }
+    }
+}
+
+impl From<nostr::Event> for Event {
+    fn from(nostr_event: nostr::Event) -> Self {
+        Event {
+            id: nostr_event.id.to_hex(),
+            pubkey: nostr_event.pubkey.to_string(),
+            created_at: nostr_event.created_at.as_u64(),
+            kind: nostr_event.kind.as_u64(),
+            tags: nostr_event.tags.iter().map(|x| x.as_vec()).collect(),
+            content: nostr_event.content,
+            sig: nostr_event.sig.to_string(),
+            delegated_by: None,
+            tagidx: None,
         }
     }
 }
@@ -414,7 +464,7 @@ mod tests {
     fn empty_event_tag_match() {
         let event = Event::simple_event();
         assert!(!event
-                .generic_tag_val_intersect('e', &HashSet::from(["foo".to_owned(), "bar".to_owned()])));
+            .generic_tag_val_intersect('e', &HashSet::from(["foo".to_owned(), "bar".to_owned()])));
     }
 
     #[test]
@@ -562,28 +612,28 @@ mod tests {
     #[test]
     fn ephemeral_event() {
         let mut event = Event::simple_event();
-        event.kind=20000;
+        event.kind = 20000;
         assert!(event.is_ephemeral());
-        event.kind=29999;
+        event.kind = 29999;
         assert!(event.is_ephemeral());
-        event.kind=30000;
+        event.kind = 30000;
         assert!(!event.is_ephemeral());
-        event.kind=19999;
+        event.kind = 19999;
         assert!(!event.is_ephemeral());
     }
 
     #[test]
     fn replaceable_event() {
         let mut event = Event::simple_event();
-        event.kind=0;
+        event.kind = 0;
         assert!(event.is_replaceable());
-        event.kind=3;
+        event.kind = 3;
         assert!(event.is_replaceable());
-        event.kind=10000;
+        event.kind = 10000;
         assert!(event.is_replaceable());
-        event.kind=19999;
+        event.kind = 19999;
         assert!(event.is_replaceable());
-        event.kind=20000;
+        event.kind = 20000;
         assert!(!event.is_replaceable());
     }
 
@@ -605,8 +655,7 @@ mod tests {
         // NIP case #1: "tags":[["d",""]]
         let mut event = Event::simple_event();
         event.kind = 30000;
-        event.tags = vec![
-            vec!["d".to_owned(), "".to_owned()]];
+        event.tags = vec![vec!["d".to_owned(), "".to_owned()]];
         assert_eq!(event.distinct_param(), Some("".to_string()));
     }
 
@@ -623,8 +672,7 @@ mod tests {
         // NIP case #3: "tags":[["d"]]: implicit empty value ""
         let mut event = Event::simple_event();
         event.kind = 30000;
-        event.tags = vec![
-            vec!["d".to_owned()]];
+        event.tags = vec![vec!["d".to_owned()]];
         assert_eq!(event.distinct_param(), Some("".to_string()));
     }
 
@@ -635,7 +683,7 @@ mod tests {
         event.kind = 30000;
         event.tags = vec![
             vec!["d".to_owned(), "".to_string()],
-            vec!["d".to_owned(), "not empty".to_string()]
+            vec!["d".to_owned(), "not empty".to_string()],
         ];
         assert_eq!(event.distinct_param(), Some("".to_string()));
     }
@@ -648,7 +696,7 @@ mod tests {
         event.kind = 30000;
         event.tags = vec![
             vec!["d".to_owned(), "not empty".to_string()],
-            vec!["d".to_owned(), "".to_string()]
+            vec!["d".to_owned(), "".to_string()],
         ];
         assert_eq!(event.distinct_param(), Some("not empty".to_string()));
     }
@@ -661,7 +709,7 @@ mod tests {
         event.tags = vec![
             vec!["d".to_owned()],
             vec!["d".to_owned(), "second value".to_string()],
-            vec!["d".to_owned(), "third value".to_string()]
+            vec!["d".to_owned(), "third value".to_string()],
         ];
         assert_eq!(event.distinct_param(), Some("".to_string()));
     }
@@ -671,9 +719,7 @@ mod tests {
         // NIP case #6: "tags":[["e"]]: same as no tags
         let mut event = Event::simple_event();
         event.kind = 30000;
-        event.tags = vec![
-            vec!["e".to_owned()],
-        ];
+        event.tags = vec![vec!["e".to_owned()]];
         assert_eq!(event.distinct_param(), Some("".to_string()));
     }
 
@@ -682,9 +728,7 @@ mod tests {
         // regular events do not expire
         let mut event = Event::simple_event();
         event.kind = 7;
-        event.tags = vec![
-            vec!["test".to_string(), "foo".to_string()],
-        ];
+        event.tags = vec![vec!["test".to_string(), "foo".to_string()]];
         assert_eq!(event.expiration(), None);
     }
 
@@ -693,57 +737,47 @@ mod tests {
         // regular events do not expire
         let mut event = Event::simple_event();
         event.kind = 7;
-        event.tags = vec![
-            vec!["expiration".to_string()],
-        ];
+        event.tags = vec![vec!["expiration".to_string()]];
         assert_eq!(event.expiration(), None);
     }
 
     #[test]
     fn expiring_event_future() {
         // a normal expiring event
-        let exp:u64 = 1676264138;
+        let exp: u64 = 1676264138;
         let mut event = Event::simple_event();
         event.kind = 1;
-        event.tags = vec![
-            vec!["expiration".to_string(), exp.to_string()],
-        ];
+        event.tags = vec![vec!["expiration".to_string(), exp.to_string()]];
         assert_eq!(event.expiration(), Some(exp));
     }
 
     #[test]
     fn expiring_event_negative() {
         // expiration set to a negative value (invalid)
-        let exp:i64 = -90;
+        let exp: i64 = -90;
         let mut event = Event::simple_event();
         event.kind = 1;
-        event.tags = vec![
-            vec!["expiration".to_string(), exp.to_string()],
-        ];
+        event.tags = vec![vec!["expiration".to_string(), exp.to_string()]];
         assert_eq!(event.expiration(), None);
     }
 
     #[test]
     fn expiring_event_zero() {
         // a normal expiring event set to zero
-        let exp:i64 = 0;
+        let exp: i64 = 0;
         let mut event = Event::simple_event();
         event.kind = 1;
-        event.tags = vec![
-            vec!["expiration".to_string(), exp.to_string()],
-        ];
+        event.tags = vec![vec!["expiration".to_string(), exp.to_string()]];
         assert_eq!(event.expiration(), Some(0));
     }
 
     #[test]
     fn expiring_event_fraction() {
         // expiration is fractional (invalid)
-        let exp:f64 = 23.334;
+        let exp: f64 = 23.334;
         let mut event = Event::simple_event();
         event.kind = 1;
-        event.tags = vec![
-            vec!["expiration".to_string(), exp.to_string()],
-        ];
+        event.tags = vec![vec!["expiration".to_string(), exp.to_string()]];
         assert_eq!(event.expiration(), None);
     }
 
