@@ -862,6 +862,7 @@ pub fn start_server(settings: &Settings, shutdown_rx: MpscReceiver<()>) -> Resul
             event_rx,
             bcast_tx.clone(),
             metadata_tx.clone(),
+            payment_tx.clone(),
             shutdown_listen,
         ));
         info!("db writer created");
