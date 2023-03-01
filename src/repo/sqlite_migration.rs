@@ -4,13 +4,13 @@ use crate::error::Result;
 use crate::event::{single_char_tagname, Event};
 use crate::utils::is_lower_hex;
 use const_format::formatcp;
+use indicatif::{ProgressBar, ProgressStyle};
 use rusqlite::limits::Limit;
 use rusqlite::params;
 use rusqlite::Connection;
 use std::cmp::Ordering;
 use std::time::Instant;
 use tracing::{debug, error, info};
-use indicatif::{ProgressBar, ProgressStyle};
 
 /// Startup DB Pragmas
 pub const STARTUP_SQL: &str = r##"
@@ -23,7 +23,7 @@ pragma mmap_size = 17179869184; -- cap mmap at 16GB
 "##;
 
 /// Latest database version
-pub const DB_VERSION: usize = 16;
+pub const DB_VERSION: usize = 18;
 
 /// Schema definition
 const INIT_SQL: &str = formatcp!(
@@ -43,6 +43,7 @@ id INTEGER PRIMARY KEY,
 event_hash BLOB NOT NULL, -- 4-byte hash
 first_seen INTEGER NOT NULL, -- when the event was first seen (not authored!) (seconds since 1970)
 created_at INTEGER NOT NULL, -- when the event was authored
+expires_at INTEGER, -- when the event expires and may be deleted
 author BLOB NOT NULL, -- author pubkey
 delegated_by BLOB, -- delegator pubkey (NIP-26)
 kind INTEGER NOT NULL, -- event kind
@@ -61,6 +62,7 @@ CREATE INDEX IF NOT EXISTS kind_author_index ON event(kind,author);
 CREATE INDEX IF NOT EXISTS kind_created_at_index ON event(kind,created_at);
 CREATE INDEX IF NOT EXISTS author_created_at_index ON event(author,created_at);
 CREATE INDEX IF NOT EXISTS author_kind_index ON event(author,kind);
+CREATE INDEX IF NOT EXISTS event_expiration ON event(expires_at);
 
 -- Tag Table
 -- Tag values are stored as either a BLOB (if they come in as a
@@ -94,6 +96,35 @@ FOREIGN KEY(metadata_event) REFERENCES event(id) ON UPDATE CASCADE ON DELETE CAS
 );
 CREATE INDEX IF NOT EXISTS user_verification_name_index ON user_verification(name);
 CREATE INDEX IF NOT EXISTS user_verification_event_index ON user_verification(metadata_event);
+
+-- Create account table
+CREATE TABLE IF NOT EXISTS account (
+pubkey TEXT PRIMARY KEY,
+is_admitted INTEGER NOT NULL DEFAULT 0,
+balance INTEGER NOT NULL DEFAULT 0,
+tos_accepted_at INTEGER
+);
+
+-- Create account index
+CREATE INDEX IF NOT EXISTS user_pubkey_index ON account(pubkey);
+
+-- Invoice table
+CREATE TABLE IF NOT EXISTS invoice (
+payment_hash TEXT PRIMARY KEY,
+pubkey TEXT NOT NULL,
+invoice TEXT NOT NULL,
+amount INTEGER NOT NULL,
+status TEXT CHECK ( status IN ('Paid', 'Unpaid', 'Expired' ) ) NOT NUll DEFAULT 'Unpaid',
+description TEXT,
+created_at INTEGER NOT NULL,
+confirmed_at INTEGER,
+CONSTRAINT invoice_pubkey_fkey FOREIGN KEY (pubkey) REFERENCES account (pubkey) ON DELETE CASCADE
+);
+
+-- Create invoice index
+CREATE INDEX IF NOT EXISTS invoice_pubkey_index ON invoice(pubkey);
+
+
 "##,
     DB_VERSION
 );
@@ -208,6 +239,12 @@ pub fn upgrade_db(conn: &mut PooledConnection) -> Result<usize> {
             if curr_version == 15 {
                 curr_version = mig_15_to_16(conn)?;
             }
+            if curr_version == 16 {
+                curr_version = mig_16_to_17(conn)?;
+            }
+            if curr_version == 17 {
+                curr_version = mig_17_to_18(conn)?;
+            }
 
             if curr_version == DB_VERSION {
                 info!(
@@ -248,8 +285,8 @@ pub fn rebuild_tags(conn: &mut PooledConnection) -> Result<()> {
         let mut stmt = tx.prepare("select id, content from event order by id;")?;
         let mut tag_rows = stmt.query([])?;
         while let Some(row) = tag_rows.next()? {
-            if (events_processed as f32)/(count as f32) > percent_done {
-                info!("Tag update {}% complete...", (100.0*percent_done).round());
+            if (events_processed as f32) / (count as f32) > percent_done {
+                info!("Tag update {}% complete...", (100.0 * percent_done).round());
                 percent_done += update_each_percent;
             }
             // we want to capture the event_id that had the tag, the tag name, and the tag hex value.
@@ -287,8 +324,6 @@ pub fn rebuild_tags(conn: &mut PooledConnection) -> Result<()> {
     info!("rebuilt tags in {:?}", start.elapsed());
     Ok(())
 }
-
-
 
 //// Migration Scripts
 
@@ -581,11 +616,17 @@ fn mig_11_to_12(conn: &mut PooledConnection) -> Result<usize> {
         tx.execute("PRAGMA user_version = 12;", [])?;
     }
     tx.commit()?;
-    info!("database schema upgraded v11 -> v12 in {:?}", start.elapsed());
+    info!(
+        "database schema upgraded v11 -> v12 in {:?}",
+        start.elapsed()
+    );
     // vacuum after large table modification
     let start = Instant::now();
     conn.execute("VACUUM;", [])?;
-    info!("vacuumed DB after hidden event cleanup in {:?}", start.elapsed());
+    info!(
+        "vacuumed DB after hidden event cleanup in {:?}",
+        start.elapsed()
+    );
     Ok(12)
 }
 
@@ -651,7 +692,7 @@ PRAGMA user_version = 15;
     match conn.execute_batch(clear_hidden_sql) {
         Ok(()) => {
             info!("all hidden events removed");
-        },
+        }
         Err(err) => {
             error!("delete failed: {}", err);
             panic!("could not remove hidden events");
@@ -683,22 +724,22 @@ CREATE INDEX IF NOT EXISTS tag_covering_index ON tag(name,kind,value,created_at,
     let start = Instant::now();
     let tx = conn.transaction()?;
 
-    let bar = ProgressBar::new(count.try_into().unwrap())
-        .with_message("rebuilding tags table");
+    let bar = ProgressBar::new(count.try_into().unwrap()).with_message("rebuilding tags table");
     bar.set_style(
         ProgressStyle::with_template(
             "[{elapsed_precise}] {bar:40.white/blue} {pos:>7}/{len:7} [{percent}%] {msg}",
         )
-            .unwrap(),
+        .unwrap(),
     );
     {
         tx.execute_batch(upgrade_sql)?;
-        let mut stmt = tx.prepare("select id, kind, created_at, content from event order by id;")?;
+        let mut stmt =
+            tx.prepare("select id, kind, created_at, content from event order by id;")?;
         let mut tag_rows = stmt.query([])?;
         let mut count = 0;
         while let Some(row) = tag_rows.next()? {
             count += 1;
-            if count%10==0 {
+            if count % 10 == 0 {
                 bar.inc(10);
             }
             let event_id: u64 = row.get(0)?;
@@ -726,6 +767,75 @@ CREATE INDEX IF NOT EXISTS tag_covering_index ON tag(name,kind,value,created_at,
     }
     bar.finish();
     tx.commit()?;
-    info!("database schema upgraded v15 -> v16 in {:?}", start.elapsed());
+    info!(
+        "database schema upgraded v15 -> v16 in {:?}",
+        start.elapsed()
+    );
     Ok(16)
+}
+
+fn mig_16_to_17(conn: &mut PooledConnection) -> Result<usize> {
+    info!("database schema needs update from 16->17");
+    let upgrade_sql = r##"
+ALTER TABLE event ADD COLUMN expires_at INTEGER;
+CREATE INDEX IF NOT EXISTS event_expiration ON event(expires_at);
+PRAGMA user_version = 17;
+"##;
+    match conn.execute_batch(upgrade_sql) {
+        Ok(()) => {
+            info!("database schema upgraded v16 -> v17");
+        }
+        Err(err) => {
+            error!("update failed: {}", err);
+            panic!("database could not be upgraded");
+        }
+    }
+    Ok(17)
+}
+
+fn mig_17_to_18(conn: &mut PooledConnection) -> Result<usize> {
+    info!("database schema needs update from 17->18");
+    let upgrade_sql = r##"
+-- Create invoices table
+CREATE TABLE IF NOT EXISTS invoice (
+payment_hash TEXT PRIMARY KEY,
+pubkey TEXT NOT NULL,
+invoice TEXT NOT NULL,
+amount INTEGER NOT NULL,
+status TEXT CHECK ( status IN ('Paid', 'Unpaid', 'Expired' ) ) NOT NUll DEFAULT 'Unpaid',
+description TEXT,
+created_at INTEGER NOT NULL,
+confirmed_at INTEGER,
+CONSTRAINT invoice_pubkey_fkey FOREIGN KEY (pubkey) REFERENCES account (pubkey) ON DELETE CASCADE
+);
+
+-- Create invoice index
+CREATE INDEX IF NOT EXISTS invoice_pubkey_index ON invoice(pubkey);
+
+-- Create account table
+
+CREATE TABLE IF NOT EXISTS account (
+pubkey TEXT PRIMARY KEY,
+is_admitted INTEGER NOT NULL DEFAULT 0,
+balance INTEGER NOT NULL DEFAULT 0,
+tos_accepted_at INTEGER
+);
+
+-- Create account index
+CREATE INDEX IF NOT EXISTS account_pubkey_index ON account(pubkey);
+
+
+pragma optimize;
+PRAGMA user_version = 18;
+"##;
+    match conn.execute_batch(upgrade_sql) {
+        Ok(()) => {
+            info!("database schema upgraded v17 -> v18");
+        }
+        Err(err) => {
+            error!("update failed: {}", err);
+            panic!("database could not be upgraded");
+        }
+    }
+    Ok(18)
 }
