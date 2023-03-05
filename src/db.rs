@@ -304,7 +304,10 @@ pub async fn db_writer(
                         continue;
                     }
                 }
-                Err(Error::SqlError(rusqlite::Error::QueryReturnedNoRows)) => {
+                Err(
+                    Error::SqlError(rusqlite::Error::QueryReturnedNoRows)
+                    | Error::SqlxError(sqlx::Error::RowNotFound),
+                ) => {
                     debug!(
                         "no verification records found for pubkey: {:?}",
                         event.get_author_prefix()
