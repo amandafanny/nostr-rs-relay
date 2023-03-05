@@ -269,7 +269,7 @@ async fn handle_web_request(
                     .body(Body::from("Sorry, joining is not allowed at the moment"))
                     .unwrap());
             }
-
+            //  include special characters in your string, such as backslashes (\) or double quotes ("), without having to escape them.
             let html = r#"
 <!doctype HTML>
 <head>
@@ -342,7 +342,6 @@ async fn handle_web_request(
                     .body(Body::from("Sorry, joining is not allowed at the moment"))
                     .unwrap());
             }
-
             // Get query pubkey from query string
             let pubkey = get_pubkey(request);
 
@@ -897,6 +896,7 @@ pub fn start_server(settings: &Settings, shutdown_rx: MpscReceiver<()>) -> Resul
             if let Ok(mut p) = payment_opt {
                 tokio::task::spawn(async move {
                     info!("starting payment process ...");
+                    // 执行 Payment 任务
                     p.run().await;
                 });
             }
